@@ -6,6 +6,7 @@ from datetime import datetime
 import pytz
 from pyrogram import Client
 from pyrogram.errors import FloodWait, ChannelInvalid, ChannelPrivate, UsernameNotOccupied
+from pyrogram.types import ChatPrivileges
 import random
 import os
 import sys
@@ -66,6 +67,15 @@ class MemberTransfer:
                 print(f"      📝 ID: {chat.id}")
                 print(f"      🔗 Username: @{getattr(chat, 'username', 'No Username')}")
                 print(f"      🏷️ Type: {chat.type}")
+                
+                # Check admin status in this group
+                try:
+                    my_status = await app.get_chat_member(chat.id, "me")
+                    admin_status = "✅ ADMIN" if my_status.status in ["creator", "administrator"] else "❌ NOT ADMIN"
+                    print(f"      🛡️ Status: {admin_status} ({my_status.status})")
+                except Exception as e:
+                    print(f"      🛡️ Status: ❌ Error checking admin: {e}")
+                
                 print("      " + "─" * 40)
         
         print(f"\n✅ Total groups found: {len(groups_found)}")
@@ -107,6 +117,34 @@ class MemberTransfer:
             print(f"❌ Error accessing group {group_id}: {e}")
             return False, None, 0
 
+    async def check_admin_rights(self, app, group_id):
+        """Check if user has admin rights to add members"""
+        try:
+            my_status = await app.get_chat_member(group_id, "me")
+            print(f"   🛡️ Your role: {my_status.status}")
+            
+            if my_status.status in ["creator", "administrator"]:
+                # Check specific permissions for adding members
+                if my_status.status == "creator":
+                    print("   ✅ Creator privileges - Full permissions")
+                    return True
+                elif my_status.status == "administrator":
+                    if my_status.privileges and my_status.privileges.can_invite_users:
+                        print("   ✅ Admin with invite permissions")
+                        return True
+                    else:
+                        print("   ❌ Admin but missing 'Invite Users' permission")
+                        print("   💡 Ask group owner to grant you 'Invite Users' permission")
+                        return False
+            else:
+                print("   ❌ You are not admin in this group")
+                print("   💡 You need to be admin with 'Invite Users' permission")
+                return False
+                
+        except Exception as e:
+            print(f"   ❌ Error checking admin rights: {e}")
+            return False
+
     async def transfer_members(self, source_group_id, target_group_id):
         """Main function to transfer members from source to target"""
         
@@ -141,19 +179,12 @@ class MemberTransfer:
                     print("❌ Cannot access target group. Please fix the issue above.")
                     return
 
-                # Check if bot is admin in target group
+                # Check if user has admin rights in target group
                 print("\n🔍 Checking admin rights in target group...")
-                try:
-                    target_member = await app.get_chat_member(target_group_id, "me")
-                    if target_member.status not in ["creator", "administrator"]:
-                        print("❌ I must be admin in the target group!")
-                        print("💡 Please make sure your account has admin rights in the target group")
-                        return
-                    else:
-                        print("✅ Admin rights confirmed in target group")
-                        print(f"   🛡️ Role: {target_member.status}")
-                except Exception as e:
-                    print(f"❌ Cannot check admin rights: {e}")
+                has_admin_rights = await self.check_admin_rights(app, target_group_id)
+                
+                if not has_admin_rights:
+                    print("❌ You don't have sufficient admin rights in target group!")
                     return
 
                 # Get members from source group
@@ -165,7 +196,12 @@ class MemberTransfer:
                     async for member in app.get_chat_members(source_group_id):
                         user = member.user
                         if not user.is_bot and not user.is_deleted and not user.is_self:
-                            members.append(user.id)
+                            user_info = {
+                                'id': user.id,
+                                'username': user.username,
+                                'first_name': user.first_name
+                            }
+                            members.append(user_info)
                             total_count += 1
                             
                             if total_count % 50 == 0:
@@ -209,10 +245,14 @@ class MemberTransfer:
                 failed_count = 0
                 failed_users = []
 
-                for index, user_id in enumerate(members):
+                for index, user_info in enumerate(members):
+                    user_id = user_info['id']
                     try:
-                        await app.add_chat_members(target_group_id, user_id)
+                        # Try to add member
+                        result = await app.add_chat_members(target_group_id, user_id)
                         success_count += 1
+                        
+                        print(f"✅ Added: {user_info['first_name']} (@{user_info['username'] or 'no_username'})")
                         
                         # Update progress every 5 members or at the end
                         if (index + 1) % 5 == 0 or (index + 1) == total_count:
@@ -228,7 +268,7 @@ class MemberTransfer:
                             self.conn.commit()
 
                         # Random delay to avoid flood
-                        delay = random.uniform(3, 6)
+                        delay = random.uniform(5, 8)  # Increased delay for safety
                         await asyncio.sleep(delay)
 
                     except FloodWait as e:
@@ -242,9 +282,17 @@ class MemberTransfer:
                         
                     except Exception as e:
                         failed_count += 1
-                        failed_users.append(user_id)
+                        failed_users.append(user_info)
+                        error_msg = str(e)
+                        print(f"❌ Failed to add {user_info['first_name']}: {error_msg}")
+                        
+                        # If it's a privacy error, skip this user
+                        if "privacy" in error_msg.lower():
+                            print(f"   ⚠️ User privacy settings prevent adding")
+                        elif "bot" in error_msg.lower():
+                            print(f"   ⚠️ Cannot add bots")
+                        
                         logger.error(f"Failed to add user {user_id}: {e}")
-                        # Continue with next user
                         continue
 
                 # Complete session
@@ -257,10 +305,13 @@ class MemberTransfer:
                 print(f"\n🎉 Transfer Completed!")
                 print(f"✅ Successfully added: {success_count} members")
                 print(f"❌ Failed: {failed_count} members")
-                print(f"📊 Success rate: {(success_count/total_count)*100:.1f}%")
+                if total_count > 0:
+                    print(f"📊 Success rate: {(success_count/total_count)*100:.1f}%")
                 
                 if failed_users:
-                    print(f"📝 Failed user IDs: {failed_users[:10]}{'...' if len(failed_users) > 10 else ''}")
+                    print(f"\n📝 Failed users (first 10):")
+                    for user in failed_users[:10]:
+                        print(f"   ❌ {user['first_name']} (@{user['username'] or 'no_username'})")
 
             except Exception as e:
                 logger.error(f"Transfer failed: {e}")
