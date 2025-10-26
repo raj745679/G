@@ -677,14 +677,14 @@ Select a section to view details:
 # Pyrogram Client Setup
 app = Client(
     "member_manager_userbot",
-    api_id=int(os.getenv("API_ID", "27769778")),
-    api_hash=os.getenv("API_HASH", "b14c7b82cb09e90706ff61f02a2b46aa")
+    api_id=int(os.getenv("API_ID", "20160673")),
+    api_hash=os.getenv("API_HASH", "120f101124e696b8da06c69d047e3f84")
 )
 
 userbot_manager = UserbotMemberManager()
 
 # Define admin ID
-ADMIN_ID = 7848273230  # Replace with the actual admin user ID
+ADMIN_ID = 8240829535  # Replace with the actual admin user ID
 
 # Command handlers with admin check
 @app.on_message(filters.command("start") & filters.private)
