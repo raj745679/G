@@ -5,8 +5,8 @@ import sqlite3
 from datetime import datetime
 import pytz
 from pyrogram import Client
-from pyrogram.errors import FloodWait, ChannelInvalid, ChannelPrivate, UsernameNotOccupied, PeerIdInvalid
-from pyrogram.types import ChatPrivileges
+from pyrogram.errors import FloodWait, ChannelInvalid, ChannelPrivate, UsernameNotOccupied, PeerIdInvalid, UserPrivacyRestricted
+from pyrogram.types import ChatPrivileges, ChatInviteLink
 import random
 import os
 import sys
@@ -41,6 +41,8 @@ class MemberTransfer:
                 target_group_id TEXT,
                 total_members INTEGER,
                 transferred_members INTEGER,
+                invited_members INTEGER,
+                invite_link TEXT,
                 status TEXT,
                 started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 completed_at DATETIME
@@ -60,19 +62,22 @@ class MemberTransfer:
                     'id': chat.id,
                     'title': chat.title,
                     'username': getattr(chat, 'username', 'No Username'),
-                    'type': chat.type
+                    'type': chat.type,
+                    'is_public': bool(getattr(chat, 'username', None))
                 }
                 groups_found.append(group_info)
                 print(f"   💬 {chat.title}")
                 print(f"      📝 ID: {chat.id}")
                 print(f"      🔗 Username: @{getattr(chat, 'username', 'No Username')}")
-                print(f"      🏷️ Type: {chat.type}")
+                print(f"      🏷️ Type: {chat.type} {'(Public)' if group_info['is_public'] else '(Private)'}")
                 
-                # Check admin status in this group
                 try:
                     my_status = await app.get_chat_member(chat.id, "me")
                     admin_status = "✅ ADMIN" if my_status.status in ["creator", "administrator"] else "❌ NOT ADMIN"
                     print(f"      🛡️ Status: {admin_status} ({my_status.status})")
+                    if my_status.status in ["creator", "administrator"]:
+                        privileges = my_status.privileges
+                        print(f"      🔑 Permissions: Invite Users: {privileges.can_invite_users if privileges else False}, Create Invite Links: {privileges.can_manage_chat if privileges else False}")
                 except Exception as e:
                     print(f"      🛡️ Status: ❌ Error checking admin: {e}")
                 
@@ -88,7 +93,6 @@ class MemberTransfer:
                 chat = await app.get_chat(identifier)
                 return True, chat, chat.id
             else:
-                # Assume username (with or without @)
                 username = identifier.lstrip('@')
                 peer = await app.resolve_peer(f"@{username}")
                 chat = await app.get_chat(peer.chat_id)
@@ -109,8 +113,8 @@ class MemberTransfer:
             return False, None, None
         except PeerIdInvalid:
             print(f"❌ PeerIdInvalid: Invalid peer ID or username {identifier}")
-            print("   💡 Ensure the ID/username is correct and you've interacted with the group (e.g., joined it or messaged in it).")
-            print("   💡 If it's a private group, join it first. For unknown peers, try using the username instead of ID.")
+            print("   💡 Ensure the ID/username is correct and you've interacted with the group (e.g., sent a message).")
+            print("   💡 If it's a private group, join it first using an invite link.")
             return False, None, None
         except Exception as e:
             print(f"❌ Error accessing group {identifier}: {e}")
@@ -123,9 +127,8 @@ class MemberTransfer:
             print(f"✅ Group Found: {chat.title}")
             print(f"   📝 ID: {chat.id}")
             print(f"   🔗 Username: @{getattr(chat, 'username', 'No Username')}")
-            print(f"   🏷️ Type: {chat.type}")
+            print(f"   🏷️ Type: {chat.type} {'(Public)' if getattr(chat, 'username', None) else '(Private)'}")
             
-            # Try to get member count
             try:
                 members_count = await app.get_chat_members_count(chat.id)
                 print(f"   👥 Members Count: {members_count}")
@@ -139,7 +142,7 @@ class MemberTransfer:
             return False, None, 0
 
     async def check_admin_rights(self, app, chat_id):
-        """Check if user has admin rights to add members"""
+        """Check if user has admin rights to add members and create invite links"""
         try:
             my_status = await app.get_chat_member(chat_id, "me")
             print(f"   🛡️ Your role: {my_status.status}")
@@ -147,23 +150,48 @@ class MemberTransfer:
             if my_status.status in ["creator", "administrator"]:
                 if my_status.status == "creator":
                     print("   ✅ Creator privileges - Full permissions")
-                    return True
+                    return True, True
                 elif my_status.status == "administrator":
-                    if my_status.privileges and my_status.privileges.can_invite_users:
-                        print("   ✅ Admin with invite permissions")
-                        return True
+                    if my_status.privileges:
+                        can_add = my_status.privileges.can_invite_users
+                        can_create_links = my_status.privileges.can_manage_chat
+                        if can_add and can_create_links:
+                            print("   ✅ Admin with permissions to add members and create invite links")
+                            return True, True
+                        else:
+                            if not can_add:
+                                print("   ❌ Admin but missing 'Invite Users' permission")
+                                print("   💡 Ask group owner to grant you 'Invite Users' permission")
+                            if not can_create_links:
+                                print("   ❌ Admin but missing 'Create Invite Links' permission")
+                                print("   💡 Ask group owner to grant you 'Create Invite Links' permission")
+                            return can_add, can_create_links
                     else:
-                        print("   ❌ Admin but missing 'Invite Users' permission")
-                        print("   💡 Ask group owner to grant you 'Invite Users' permission")
-                        return False
+                        print("   ❌ Admin but no privileges assigned")
+                        print("   💡 Ask group owner to grant you 'Invite Users' and 'Create Invite Links' permissions")
+                        return False, False
             else:
-                print("   ❌ You are not admin in this group")
-                print("   💡 You need to be admin with 'Invite Users' permission")
-                return False
+                print("   ❌ You are not an admin in this group")
+                print("   💡 You need to be an admin with 'Invite Users' and 'Create Invite Links' permissions")
+                return False, False
                 
         except Exception as e:
             print(f"   ❌ Error checking admin rights: {e}")
-            return False
+            return False, False
+
+    async def create_invite_link(self, app, chat_id):
+        """Create an invite link for the target group"""
+        try:
+            invite_link = await app.create_chat_invite_link(
+                chat_id=chat_id,
+                name=f"Auto-generated invite for transfer {datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S')}",
+                expire_date=None,
+                member_limit=1  # Single-use link for safety
+            )
+            return invite_link.invite_link
+        except Exception as e:
+            print(f"❌ Failed to create invite link: {e}")
+            return None
 
     async def transfer_members(self, source_identifier, target_identifier):
         """Main function to transfer members from source to target"""
@@ -178,17 +206,14 @@ class MemberTransfer:
                 print(f"📤 Target: {target_identifier}")
                 print("─" * 50)
 
-                # Get current user info
                 me = await app.get_me()
                 print(f"👤 Logged in as: {me.first_name} (@{me.username})")
                 print(f"📱 Phone: {me.phone_number}")
                 print("─" * 50)
 
-                # Debug: Show all accessible groups
                 await self.debug_groups(app)
                 print("─" * 50)
 
-                # Resolve source group
                 print("🔍 Resolving source group...")
                 source_accessible, source_chat, source_chat_id = await self.resolve_group_identifier(app, source_identifier)
                 
@@ -196,7 +221,6 @@ class MemberTransfer:
                     print("❌ Cannot access source group. Please fix the issue above.")
                     return
 
-                # Verify source group access
                 print("\n🔍 Verifying source group access...")
                 source_accessible, source_chat, source_member_count = await self.verify_group_access(app, source_chat_id)
                 
@@ -204,7 +228,6 @@ class MemberTransfer:
                     print("❌ Cannot verify source group access. Please fix the issue above.")
                     return
 
-                # Resolve target group
                 print("\n🔍 Resolving target group...")
                 target_accessible, target_chat, target_chat_id = await self.resolve_group_identifier(app, target_identifier)
                 
@@ -212,7 +235,6 @@ class MemberTransfer:
                     print("❌ Cannot access target group. Please fix the issue above.")
                     return
 
-                # Verify target group access
                 print("\n🔍 Verifying target group access...")
                 target_accessible, target_chat, target_member_count = await self.verify_group_access(app, target_chat_id)
                 
@@ -220,15 +242,23 @@ class MemberTransfer:
                     print("❌ Cannot verify target group access. Please fix the issue above.")
                     return
 
-                # Check admin rights in target group
                 print("\n🔍 Checking admin rights in target group...")
-                has_admin_rights = await self.check_admin_rights(app, target_chat_id)
+                can_add_members, can_create_links = await self.check_admin_rights(app, target_chat_id)
                 
-                if not has_admin_rights:
-                    print("❌ You don't have sufficient admin rights in target group!")
+                if not can_add_members:
+                    print("❌ You don't have sufficient admin rights to add members in the target group!")
                     return
+                if not can_create_links:
+                    print("⚠️ You don't have permission to create invite links. The script will attempt direct adds only.")
 
-                # Get members from source group
+                invite_link = None
+                if can_create_links:
+                    invite_link = await self.create_invite_link(app, target_chat_id)
+                    if not invite_link:
+                        print("⚠️ Failed to create invite link. Proceeding with direct adds only.")
+                    else:
+                        print(f"🔗 Generated invite link: {invite_link}")
+
                 print(f"\n📥 Collecting members from source group...")
                 members = []
                 total_count = 0
@@ -261,19 +291,19 @@ class MemberTransfer:
                     print("💡 You may need to be admin in the source group to see members")
                     return
 
-                # Start transfer session in database
                 cursor = self.conn.cursor()
                 cursor.execute(
-                    "INSERT INTO transfer_sessions (source_group_id, target_group_id, total_members, transferred_members, status) VALUES (?, ?, ?, ?, ?)",
-                    (str(source_identifier), str(target_identifier), total_count, 0, 'started')
+                    "INSERT INTO transfer_sessions (source_group_id, target_group_id, total_members, transferred_members, invited_members, invite_link, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (str(source_identifier), str(target_identifier), total_count, 0, 0, invite_link or "N/A", 'started')
                 )
                 session_id = cursor.lastrowid
                 self.conn.commit()
 
-                # Ask for confirmation
                 print(f"\n⚠️ READY TO START TRANSFER:")
                 print(f"   Source: {source_chat.title} ({total_count} members)")
                 print(f"   Target: {target_chat.title}")
+                if invite_link:
+                    print(f"   Invite Link: {invite_link}")
                 print(f"   Estimated time: {total_count * 6 / 60:.1f} minutes")
                 
                 confirm = input("\n❓ Continue with transfer? (y/N): ").strip().lower()
@@ -281,9 +311,9 @@ class MemberTransfer:
                     print("🚫 Transfer cancelled by user")
                     return
 
-                # Transfer members
                 print("📤 Starting member transfer...")
                 success_count = 0
+                invited_count = 0
                 failed_count = 0
                 failed_users = []
 
@@ -297,20 +327,27 @@ class MemberTransfer:
                         username = f"@{user_info['username']}" if user_info['username'] else "no_username"
                         print(f"✅ [{success_count}] Added: {full_name} ({username})")
                         
-                        if (index + 1) % 5 == 0 or (index + 1) == total_count:
-                            progress = get_progress_bar(success_count, total_count)
-                            percentage = (success_count / total_count) * 100
-                            print(f"🔄 Overall Progress: {success_count}/{total_count} ({percentage:.1f}%) {progress}")
-                            
-                            cursor.execute(
-                                "UPDATE transfer_sessions SET transferred_members = ? WHERE id = ?",
-                                (success_count, session_id)
-                            )
-                            self.conn.commit()
-
-                        delay = random.uniform(5, 8)
-                        await asyncio.sleep(delay)
-
+                    except UserPrivacyRestricted:
+                        if invite_link:
+                            print(f"   ⚠️ Privacy restriction for {full_name} ({username}), sending invite link...")
+                            try:
+                                await app.send_message(
+                                    chat_id=user_id,
+                                    text=f"You're invited to join {target_chat.title}! Please use this link: {invite_link}"
+                                )
+                                invited_count += 1
+                                print(f"   📩 Invite link sent to {full_name} ({username})")
+                            except Exception as e:
+                                failed_count += 1
+                                failed_users.append(user_info)
+                                print(f"   ❌ Failed to send invite to {full_name} ({username}): {e}")
+                                logger.error(f"Failed to send invite to user {user_id}: {e}")
+                                continue
+                        else:
+                            failed_count += 1
+                            failed_users.append(user_info)
+                            print(f"   ❌ Cannot add {full_name} ({username}) due to privacy settings and no invite link available")
+                            continue
                     except FloodWait as e:
                         print(f"⏳ Flood wait: {e.value} seconds...")
                         wait_time = e.value
@@ -320,7 +357,6 @@ class MemberTransfer:
                             await asyncio.sleep(1)
                         print("🔄 Resuming transfer after flood wait...")
                         continue
-                        
                     except Exception as e:
                         failed_count += 1
                         failed_users.append(user_info)
@@ -331,9 +367,7 @@ class MemberTransfer:
                         
                         print(f"❌ Failed to add {full_name}: {error_msg}")
                         
-                        if "privacy" in error_msg.lower():
-                            print(f"   ⚠️ User privacy settings prevent adding")
-                        elif "bot" in error_msg.lower():
+                        if "bot" in error_msg.lower():
                             print(f"   ⚠️ Cannot add bots")
                         elif "kicked" in error_msg.lower():
                             print(f"   ⚠️ User is banned from target group")
@@ -343,18 +377,32 @@ class MemberTransfer:
                         logger.error(f"Failed to add user {user_id}: {e}")
                         continue
 
-                # Complete session
+                    if (index + 1) % 5 == 0 or (index + 1) == total_count:
+                        progress = get_progress_bar(success_count + invited_count, total_count)
+                        percentage = ((success_count + invited_count) / total_count) * 100
+                        print(f"🔄 Overall Progress: {success_count} added, {invited_count} invited/{total_count} ({percentage:.1f}%) {progress}")
+                        
+                        cursor.execute(
+                            "UPDATE transfer_sessions SET transferred_members = ?, invited_members = ? WHERE id = ?",
+                            (success_count, invited_count, session_id)
+                        )
+                        self.conn.commit()
+
+                    delay = random.uniform(5, 8)
+                    await asyncio.sleep(delay)
+
                 cursor.execute(
-                    "UPDATE transfer_sessions SET status = ?, transferred_members = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    ('completed', success_count, session_id)
+                    "UPDATE transfer_sessions SET status = ?, transferred_members = ?, invited_members = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    ('completed', success_count, invited_count, session_id)
                 )
                 self.conn.commit()
 
                 print(f"\n🎉 Transfer Completed!")
                 print(f"✅ Successfully added: {success_count} members")
+                print(f"📩 Invited via link: {invited_count} members")
                 print(f"❌ Failed: {failed_count} members")
                 if total_count > 0:
-                    print(f"📊 Success rate: {(success_count/total_count)*100:.1f}%")
+                    print(f"📊 Success rate (added + invited): {((success_count + invited_count)/total_count)*100:.1f}%")
                 
                 if failed_users:
                     print(f"\n📝 Failed users (first 10):")
@@ -381,7 +429,7 @@ class MemberTransfer:
         cursor = self.conn.cursor()
         cursor.execute('''
             SELECT id, source_group_id, target_group_id, total_members, 
-                   transferred_members, status, started_at, completed_at 
+                   transferred_members, invited_members, invite_link, status, started_at, completed_at 
             FROM transfer_sessions 
             ORDER BY started_at DESC 
             LIMIT 10
@@ -393,18 +441,18 @@ class MemberTransfer:
             return
         
         print("\n📋 Transfer History:")
-        print("=" * 80)
-        print(f"{'ID':<3} | {'Source':<20} | {'Target':<20} | {'Transferred':<12} | {'Status':<10} | {'Started':<16}")
-        print("-" * 80)
+        print("=" * 100)
+        print(f"{'ID':<3} | {'Source':<20} | {'Target':<20} | {'Added':<8} | {'Invited':<8} | {'Total':<8} | {'Status':<8} | {'Started':<16}")
+        print("-" * 100)
         
         for session in sessions:
-            session_id, source_id, target_id, total, transferred, status, started, completed = session
+            session_id, source_id, target_id, total, transferred, invited, invite_link, status, started, completed = session
             status_icon = "✅" if status == "completed" else "🔄" if status == "started" else "❌"
             started_str = started[:16] if started else "N/A"
             
-            print(f"{session_id:<3} | {source_id:<20} | {target_id:<20} | {transferred}/{total:<10} | {status_icon:<10} | {started_str:<16}")
+            print(f"{session_id:<3} | {source_id:<20} | {target_id:<20} | {transferred:<8} | {invited:<8} | {total:<8} | {status_icon:<8} | {started_str:<16}")
         
-        print("=" * 80)
+        print("=" * 100)
 
 def print_banner():
     """Print application banner"""
@@ -428,12 +476,15 @@ def print_usage():
     print("  python3 Xx.py history")
     print("  python3 Xx.py debug")
     print("\n🔧 Setup:")
-    print("  export API_ID=your_api_id")
-    print("  export API_HASH=your_api_hash")
+    print("  - export API_ID=your_api_id")
+    print("  - export API_HASH=your_api_hash")
     print("\n💡 Notes:")
+    print("  - Supports both private and public groups for source and target")
     print("  - Use group IDs (e.g., -100123456789) or usernames (e.g., @GroupUsername)")
-    print("  - For private groups, ensure you're a member and have interacted with the group")
-    print("  - Run 'debug' to list accessible groups and verify IDs")
+    print("  - If direct add fails due to privacy, an invite link will be sent (requires 'Create Invite Links' permission)")
+    print("  - You must be an admin with 'Invite Users' permission in the target group")
+    print("  - For private groups, join them first and interact (e.g., send a message)")
+    print("  - Run 'debug' to list accessible groups and check permissions")
     print("  - Get API credentials from https://my.telegram.org/")
 
 async def debug_groups():
