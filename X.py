@@ -148,15 +148,24 @@ class MemberTransfer:
     async def transfer_members(self, source_group_id, target_group_id):
         """Main function to transfer members from source to target"""
         
-        # Get client from environment variables
+        # Get client from environment variables - USE YOUR USER ACCOUNT
         api_id = int(os.getenv("API_ID"))
         api_hash = os.getenv("API_HASH")
         
-        async with Client("member_transfer", api_id=api_id, api_hash=api_hash) as app:
+        # Use your phone number as session name to ensure user account
+        session_name = "user_account"
+        
+        async with Client(session_name, api_id=api_id, api_hash=api_hash) as app:
             try:
                 print(f"🚀 Starting member transfer...")
                 print(f"📥 Source Group: {source_group_id}")
                 print(f"📤 Target Group: {target_group_id}")
+                print("─" * 50)
+
+                # Get current user info to confirm it's your account
+                me = await app.get_me()
+                print(f"👤 Logged in as: {me.first_name} (@{me.username})")
+                print(f"📱 Phone: {me.phone_number}")
                 print("─" * 50)
 
                 # Debug: Show all accessible groups
@@ -199,7 +208,8 @@ class MemberTransfer:
                             user_info = {
                                 'id': user.id,
                                 'username': user.username,
-                                'first_name': user.first_name
+                                'first_name': user.first_name,
+                                'last_name': user.last_name
                             }
                             members.append(user_info)
                             total_count += 1
@@ -232,7 +242,7 @@ class MemberTransfer:
                 print(f"\n⚠️  READY TO START TRANSFER:")
                 print(f"   Source: {source_chat.title} ({total_count} members)")
                 print(f"   Target: {target_chat.title}")
-                print(f"   Estimated time: {total_count * 5 / 60:.1f} minutes")
+                print(f"   Estimated time: {total_count * 6 / 60:.1f} minutes")
                 
                 confirm = input("\n❓ Continue with transfer? (y/N): ").strip().lower()
                 if confirm not in ['y', 'yes']:
@@ -252,13 +262,15 @@ class MemberTransfer:
                         result = await app.add_chat_members(target_group_id, user_id)
                         success_count += 1
                         
-                        print(f"✅ Added: {user_info['first_name']} (@{user_info['username'] or 'no_username'})")
+                        full_name = f"{user_info['first_name']} {user_info['last_name'] or ''}".strip()
+                        username = f"@{user_info['username']}" if user_info['username'] else "no_username"
+                        print(f"✅ [{success_count}] Added: {full_name} ({username})")
                         
                         # Update progress every 5 members or at the end
                         if (index + 1) % 5 == 0 or (index + 1) == total_count:
                             progress = get_progress_bar(success_count, total_count)
                             percentage = (success_count / total_count) * 100
-                            print(f"🔄 Progress: {success_count}/{total_count} ({percentage:.1f}%) {progress}")
+                            print(f"🔄 Overall Progress: {success_count}/{total_count} ({percentage:.1f}%) {progress}")
                             
                             # Update database
                             cursor.execute(
@@ -268,15 +280,17 @@ class MemberTransfer:
                             self.conn.commit()
 
                         # Random delay to avoid flood
-                        delay = random.uniform(5, 8)  # Increased delay for safety
+                        delay = random.uniform(5, 8)
                         await asyncio.sleep(delay)
 
                     except FloodWait as e:
                         print(f"⏳ Flood wait: {e.value} seconds...")
-                        for i in range(e.value, 0, -1):
+                        wait_time = e.value
+                        for i in range(wait_time, 0, -1):
                             if i % 30 == 0 or i <= 10:
                                 print(f"⏰ Waiting: {i} seconds remaining...")
                             await asyncio.sleep(1)
+                        print("🔄 Resuming transfer after flood wait...")
                         # Retry the same user after flood wait
                         continue
                         
@@ -284,15 +298,25 @@ class MemberTransfer:
                         failed_count += 1
                         failed_users.append(user_info)
                         error_msg = str(e)
-                        print(f"❌ Failed to add {user_info['first_name']}: {error_msg}")
                         
-                        # If it's a privacy error, skip this user
+                        full_name = f"{user_info['first_name']} {user_info['last_name'] or ''}".strip()
+                        username = f"@{user_info['username']}" if user_info['username'] else "no_username"
+                        
+                        print(f"❌ Failed to add {full_name}: {error_msg}")
+                        
+                        # Specific error handling
                         if "privacy" in error_msg.lower():
                             print(f"   ⚠️ User privacy settings prevent adding")
                         elif "bot" in error_msg.lower():
                             print(f"   ⚠️ Cannot add bots")
+                        elif "kicked" in error_msg.lower():
+                            print(f"   ⚠️ User is banned from target group")
+                        elif "user not found" in error_msg.lower():
+                            print(f"   ⚠️ User account not found")
                         
                         logger.error(f"Failed to add user {user_id}: {e}")
+                        
+                        # Continue with next user
                         continue
 
                 # Complete session
@@ -311,7 +335,9 @@ class MemberTransfer:
                 if failed_users:
                     print(f"\n📝 Failed users (first 10):")
                     for user in failed_users[:10]:
-                        print(f"   ❌ {user['first_name']} (@{user['username'] or 'no_username'})")
+                        full_name = f"{user['first_name']} {user['last_name'] or ''}".strip()
+                        username = f"@{user['username']}" if user['username'] else "no_username"
+                        print(f"   ❌ {full_name} ({username})")
 
             except Exception as e:
                 logger.error(f"Transfer failed: {e}")
@@ -386,7 +412,7 @@ async def debug_groups():
     api_id = int(os.getenv("API_ID"))
     api_hash = os.getenv("API_HASH")
     
-    async with Client("debug", api_id=api_id, api_hash=api_hash) as app:
+    async with Client("user_account", api_id=api_id, api_hash=api_hash) as app:
         transfer_tool = MemberTransfer()
         await transfer_tool.debug_groups(app)
 
