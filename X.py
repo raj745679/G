@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import sqlite3
+import json
 from datetime import datetime
 import pytz
 from pyrogram import Client
@@ -55,33 +56,37 @@ class MemberTransfer:
         print("\n🔍 Scanning your accessible groups...")
         groups_found = []
         
-        async for dialog in app.get_dialogs():
-            chat = dialog.chat
-            if chat.type in ["group", "supergroup"]:
-                group_info = {
-                    'id': chat.id,
-                    'title': chat.title,
-                    'username': getattr(chat, 'username', 'No Username'),
-                    'type': chat.type,
-                    'is_public': bool(getattr(chat, 'username', None))
-                }
-                groups_found.append(group_info)
-                print(f"   💬 {chat.title}")
-                print(f"      📝 ID: {chat.id}")
-                print(f"      🔗 Username: @{getattr(chat, 'username', 'No Username')}")
-                print(f"      🏷️ Type: {chat.type} {'(Public)' if group_info['is_public'] else '(Private)'}")
-                
-                try:
-                    my_status = await app.get_chat_member(chat.id, "me")
-                    admin_status = "✅ ADMIN" if my_status.status in ["creator", "administrator"] else "❌ NOT ADMIN"
-                    print(f"      🛡️ Status: {admin_status} ({my_status.status})")
-                    if my_status.status in ["creator", "administrator"]:
-                        privileges = my_status.privileges
-                        print(f"      🔑 Permissions: Invite Users: {privileges.can_invite_users if privileges else False}, Create Invite Links: {privileges.can_manage_chat if privileges else False}")
-                except Exception as e:
-                    print(f"      🛡️ Status: ❌ Error checking admin: {e}")
-                
-                print("      " + "─" * 40)
+        try:
+            async for dialog in app.get_dialogs():
+                chat = dialog.chat
+                if chat.type in ["group", "supergroup"]:
+                    group_info = {
+                        'id': chat.id,
+                        'title': chat.title,
+                        'username': getattr(chat, 'username', 'No Username'),
+                        'type': chat.type,
+                        'is_public': bool(getattr(chat, 'username', None))
+                    }
+                    groups_found.append(group_info)
+                    print(f"   💬 {chat.title}")
+                    print(f"      📝 ID: {chat.id}")
+                    print(f"      🔗 Username: @{getattr(chat, 'username', 'No Username')}")
+                    print(f"      🏷️ Type: {chat.type} {'(Public)' if group_info['is_public'] else '(Private)'}")
+                    
+                    try:
+                        my_status = await app.get_chat_member(chat.id, "me")
+                        admin_status = "✅ ADMIN" if my_status.status in ["creator", "administrator"] else "❌ NOT ADMIN"
+                        print(f"      🛡️ Status: {admin_status} ({my_status.status})")
+                        if my_status.status in ["creator", "administrator"]:
+                            privileges = my_status.privileges
+                            print(f"      🔑 Permissions: Invite Users: {privileges.can_invite_users if privileges else False}, Create Invite Links: {privileges.can_manage_chat if privileges else False}")
+                    except Exception as e:
+                        print(f"      🛡️ Status: ❌ Error checking admin: {e}")
+                    
+                    print("      " + "─" * 40)
+        except Exception as e:
+            print(f"❌ Error listing groups: {e}")
+            print("   💡 Ensure you have interacted with groups (e.g., sent messages) and check API limits.")
         
         print(f"\n✅ Total groups found: {len(groups_found)}")
         return groups_found
@@ -193,6 +198,48 @@ class MemberTransfer:
             print(f"❌ Failed to create invite link: {e}")
             return None
 
+    async def scrape_and_save_members(self, app, source_chat_id, source_title):
+        """Scrape members from source group and save to JSON file"""
+        members = []
+        total_count = 0
+        members_file = f"members_{source_chat_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        print(f"\n📥 Scraping members from source group: {source_title}...")
+        try:
+            async for member in app.get_chat_members(source_chat_id):
+                user = member.user
+                if not user.is_bot and not user.is_deleted and not user.is_self:
+                    user_info = {
+                        'id': user.id,
+                        'username': user.username,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name
+                    }
+                    members.append(user_info)
+                    total_count += 1
+                    
+                    if total_count % 50 == 0:
+                        progress = get_progress_bar(total_count, 1000)
+                        print(f"👥 Collected {total_count} members... {progress}")
+            
+            print(f"✅ Total members collected: {total_count}")
+            
+            if total_count == 0:
+                print("❌ No members found in source group")
+                return None, 0
+            
+            # Save members to JSON file
+            with open(members_file, 'w', encoding='utf-8') as f:
+                json.dump(members, f, ensure_ascii=False, indent=4)
+            print(f"💾 Members saved to {members_file}")
+            
+            return members, total_count
+        
+        except Exception as e:
+            print(f"❌ Error collecting members: {e}")
+            print("💡 You may need to be admin in the source group to see members")
+            return None, 0
+
     async def transfer_members(self, source_identifier, target_identifier):
         """Main function to transfer members from source to target"""
         api_id = int(os.getenv("API_ID"))
@@ -259,36 +306,11 @@ class MemberTransfer:
                     else:
                         print(f"🔗 Generated invite link: {invite_link}")
 
-                print(f"\n📥 Collecting members from source group...")
-                members = []
-                total_count = 0
+                # Scrape and save members
+                members, total_count = await self.scrape_and_save_members(app, source_chat_id, source_chat.title)
                 
-                try:
-                    async for member in app.get_chat_members(source_chat_id):
-                        user = member.user
-                        if not user.is_bot and not user.is_deleted and not user.is_self:
-                            user_info = {
-                                'id': user.id,
-                                'username': user.username,
-                                'first_name': user.first_name,
-                                'last_name': user.last_name
-                            }
-                            members.append(user_info)
-                            total_count += 1
-                            
-                            if total_count % 50 == 0:
-                                progress = get_progress_bar(total_count, 1000)
-                                print(f"👥 Collected {total_count} members... {progress}")
-                    
-                    print(f"✅ Total members collected: {total_count}")
-
-                    if total_count == 0:
-                        print("❌ No members found in source group")
-                        return
-
-                except Exception as e:
-                    print(f"❌ Error collecting members: {e}")
-                    print("💡 You may need to be admin in the source group to see members")
+                if not members:
+                    print("❌ Cannot proceed with transfer due to no members collected.")
                     return
 
                 cursor = self.conn.cursor()
@@ -311,7 +333,7 @@ class MemberTransfer:
                     print("🚫 Transfer cancelled by user")
                     return
 
-                print("📤 Starting member transfer...")
+                print("📤 Starting member transfer from saved members...")
                 success_count = 0
                 invited_count = 0
                 failed_count = 0
@@ -407,7 +429,7 @@ class MemberTransfer:
                 if failed_users:
                     print(f"\n📝 Failed users (first 10):")
                     for user in failed_users[:10]:
-                        full_name = f"{user['first_name']} {user['last_name'] or ''}".strip()
+                        full_name = f"{user['first_name']} {user_info['last_name'] or ''}".strip()
                         username = f"@{user['username']}" if user['username'] else "no_username"
                         print(f"   ❌ {full_name} ({username})")
 
@@ -480,7 +502,7 @@ def print_usage():
     print("  - export API_HASH=your_api_hash")
     print("\n💡 Notes:")
     print("  - Supports both private and public groups for source and target")
-    print("  - Use group IDs (e.g., -100123456789) or usernames (e.g., @GroupUsername)")
+    print("  - Scrapes and saves members to a JSON file before transfer")
     print("  - If direct add fails due to privacy, an invite link will be sent (requires 'Create Invite Links' permission)")
     print("  - You must be an admin with 'Invite Users' permission in the target group")
     print("  - For private groups, join them first and interact (e.g., send a message)")
